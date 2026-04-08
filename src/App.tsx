@@ -82,7 +82,8 @@ export default function App() {
     meshService.on('message', async (msg: MeshMessage) => {
       // Handle different message types
       if (msg.type === 'BEACON') {
-        const { battery, signal } = msg.payload;
+        const payload = msg.payload as { battery: number; signal: "Strong" | "Weak" | "Dead" };
+        const { battery, signal } = payload;
         setNodes(prev => prev.map(n => 
           n.id === msg.senderId 
             ? { ...n, battery, signal, active: true } 
@@ -100,7 +101,7 @@ export default function App() {
         return;
       }
 
-      const payload: VaultMessage = msg.payload;
+      const payload = msg.payload as VaultMessage;
       const exists = await vault.messages.get(payload.id);
       
       if (!exists) {
@@ -231,7 +232,6 @@ export default function App() {
               key="radar" 
               nodes={nodes} 
               isTransmitting={packets.some(p => p.type === 'XMIT')}
-              isStealth={isStealthMode}
               resolveName={resolveName}
             />
           )}
@@ -253,9 +253,6 @@ export default function App() {
               key="net" 
               packets={packets} 
               relayQueue={relayQueue} 
-              onInject={() => {
-                addPacket('QUERY', 'MESH', 'NODE_STATUS_REQ');
-              }} 
               onClear={async () => {
                 await vault.messages.clear();
                 setMessages([]);
@@ -367,7 +364,7 @@ function NavButton({ icon, label, active, onClick }: { icon: React.ReactNode, la
   );
 }
 
-function RadarScreen({ nodes, isTransmitting, resolveName }: { nodes: Node[], isTransmitting?: boolean, isStealth?: boolean, resolveName: (n: Node) => string }) {
+function RadarScreen({ nodes, isTransmitting, resolveName }: { nodes: Node[], isTransmitting?: boolean, resolveName: (n: Node) => string }) {
   const ticks = Array.from({ length: 180 }, (_, i) => i * 2); // Ticks every 2 degrees
 
   return (
@@ -580,7 +577,7 @@ function ChatScreen({ messages, onSendMessage }: { messages: VaultMessage[], onS
   );
 }
 
-function TacticalTerminal({ packets, relayQueue, onInject, onClear }: { packets: any[], relayQueue: any[], onInject: () => void, onClear: () => void }) {
+function TacticalTerminal({ packets, relayQueue, onInject, onClear }: { packets: Packet[], relayQueue: RelayItem[], onInject?: () => void, onClear: () => void }) {
   return (
     <motion.div 
       initial={{ opacity: 0 }}
@@ -592,12 +589,14 @@ function TacticalTerminal({ packets, relayQueue, onInject, onClear }: { packets:
           <Terminal className="w-4 h-4" /> MONITOR DE TRÁFEGO
         </h2>
         <div className="flex gap-2">
-          <button 
-            onClick={onInject}
-            className="text-[10px] px-2 py-1 border border-cyber-cyan/30 text-cyber-cyan hover:bg-cyber-cyan/10 transition-colors uppercase"
-          >
-            Injetar Pacote
-          </button>
+          {onInject && (
+            <button 
+              onClick={onInject}
+              className="text-[10px] px-2 py-1 border border-cyber-cyan/30 text-cyber-cyan hover:bg-cyber-cyan/10 transition-colors uppercase"
+            >
+              Injetar Pacote
+            </button>
+          )}
           <button 
             onClick={onClear}
             className="text-[10px] px-2 py-1 border border-red-900/50 text-red-500 hover:bg-red-900/20 transition-colors uppercase"

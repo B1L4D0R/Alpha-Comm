@@ -16,7 +16,7 @@ export interface MeshMessage {
   senderId: string;
   timestamp: number;
   type: 'CHAT' | 'SOS' | 'BEACON' | 'RELAY';
-  payload: any;
+  payload: unknown;
   hops: string[]; // Track which nodes this message has passed through
   isEncrypted?: boolean;
 }
@@ -26,7 +26,7 @@ export class MeshService extends EventEmitter {
   private myId: string = Math.random().toString(36).substr(2, 6).toUpperCase();
   private pendingInitiator: Peer.Instance | null = null;
   private seenMessageIds: Set<string> = new Set();
-  private beaconInterval: any = null;
+  private beaconInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     super();
@@ -148,7 +148,7 @@ export class MeshService extends EventEmitter {
     // 4. Decrypt if needed
     const processedMsg: MeshMessage = { ...msg };
     if (msg.type === 'CHAT' || msg.type === 'SOS') {
-      const decryptedPayload = await securityService.decrypt(msg.payload);
+      const decryptedPayload = await securityService.decrypt(msg.payload as string);
       try {
         processedMsg.payload = JSON.parse(decryptedPayload);
         processedMsg.isEncrypted = true; // Flag for UI
@@ -197,11 +197,11 @@ export class MeshService extends EventEmitter {
     this.emit('peer_connected', id);
   }
 
-  async broadcast(payload: any, type: MeshMessage['type'] = 'CHAT') {
+  async broadcast(payload: unknown, type: MeshMessage['type'] = 'CHAT') {
     const msgId = Math.random().toString(36).substr(2, 6).toUpperCase();
     
     // Encrypt payload if it's sensitive
-    let finalPayload = payload;
+    let finalPayload: any = payload;
     if (type === 'CHAT' || type === 'SOS') {
       finalPayload = await securityService.encrypt(JSON.stringify(payload));
     }

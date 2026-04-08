@@ -1,0 +1,8 @@
+{
+  "name": "alpha-comm",
+  "pages_build_config": {
+    "build_command": "npm run build",
+    "destination_dir": "dist"
+  },
+  "compatibility_date": "2026-04-08"
+}
