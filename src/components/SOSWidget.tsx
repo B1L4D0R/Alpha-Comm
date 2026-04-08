@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { AlertTriangle, ShieldAlert, Zap, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { meshService } from '../services/mesh';
+import { vault } from '../services/db';
 
 export default function SOSWidget() {
   const [isOpen, setIsOpen] = useState(false);
@@ -24,17 +26,30 @@ export default function SOSWidget() {
     return () => clearInterval(timer);
   }, [isSignaling]);
 
-  const triggerSOS = () => {
+  const triggerSOS = async () => {
     setIsSignaling(true);
-    // In a real app, this would blast the SOS packet via BLE/Wi-Fi
+    // Real tactical SOS broadcast
+    await meshService.broadcast({
+        alert: 'MAYDAY',
+        status: 'CRITICAL',
+        coordinates: 'SIMULATED_GPS_FIX'
+    }, 'SOS');
   };
 
-  const triggerWipe = () => {
+  const triggerWipe = async () => {
     setWipeActive(true);
-    // Simulated remote wipe
+    
+    // 1. Clear database (all messages and peers)
+    await vault.delete();
+    
+    // 2. Clear keys and local settings
+    localStorage.clear();
+    sessionStorage.clear();
+
+    // 3. Simulated lockdown delay
     setTimeout(() => {
       window.location.reload();
-    }, 2000);
+    }, 2500);
   };
 
   return (

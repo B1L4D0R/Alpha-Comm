@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
-import { Radio, MessageSquare, Battery, Zap, Signal, AlertTriangle, Key, X, Info, Terminal, Activity, Send } from 'lucide-react';
+import { Radio, MessageSquare, Battery, Zap, Signal, AlertTriangle, Key, X, Info, Terminal, Activity, Send, ShieldCheck } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useRegisterSW } from 'virtual:pwa-register/react';
 import { vault, type Message as VaultMessage } from './services/db';
-import { meshService } from './services/mesh';
+import { meshService, type MeshMessage } from './services/mesh';
 import HandshakeUI from './components/HandshakeUI';
 import SOSWidget from './components/SOSWidget';
 import InfoModal from './components/InfoModal';
@@ -16,6 +16,21 @@ interface Node {
   signal: 'Strong' | 'Weak' | 'Dead';
   battery: number;
   active: boolean;
+}
+
+interface Packet {
+  id: string;
+  time: string;
+  type: string;
+  source: string;
+  size: string;
+  status: string;
+}
+
+interface RelayItem {
+  id: string;
+  source: string;
+  type: string;
 }
 
 
@@ -35,8 +50,9 @@ export default function App() {
   ]);
 
   const [messages, setMessages] = useState<VaultMessage[]>([]);
-  const [packets, setPackets] = useState<any[]>([]);
-  const [relayQueue, setRelayQueue] = useState<any[]>([]);
+  const [packets, setPackets] = useState<Packet[]>([]);
+  const [relayQueue, setRelayQueue] = useState<RelayItem[]>([]);
+  const [emergencyAlert, setEmergencyAlert] = useState<{ sender: string, time: string } | null>(null);
 
   const addPacket = (type: string, source: string, size: string) => {
     const pkt = {
@@ -50,14 +66,6 @@ export default function App() {
     setPackets(prev => [pkt, ...prev].slice(0, 20));
   };
 
-  const injectPacket = () => {
-    const id = Math.random().toString(36).substr(2, 4).toUpperCase();
-    setRelayQueue(prev => [...prev, { id, source: 'ECHO-9', ttl: 4 }].slice(-10));
-    setTimeout(() => {
-      setRelayQueue(prev => prev.filter(p => p.id !== id));
-      addPacket('RELAY', 'ECHO-9', 'DATA_CHUNK');
-    }, 2000);
-  };
 
   // Load Initial Data from Real Vault
   useEffect(() => {
@@ -70,13 +78,54 @@ export default function App() {
 
   // Sync real mesh events to UI
   useEffect(() => {
-    meshService.on('message', async (msg: VaultMessage) => {
-      const exists = await vault.messages.get(msg.id);
-      if (!exists) {
-        await vault.messages.add(msg);
-        setMessages(prev => [...prev, msg]);
-        addPacket('RECV', msg.senderId.slice(0, 4), 'SECURE_TEXT');
+    // 1. New Message Received (Direct or Relayed)
+    meshService.on('message', async (msg: MeshMessage) => {
+      // Handle different message types
+      if (msg.type === 'BEACON') {
+        const { battery, signal } = msg.payload;
+        setNodes(prev => prev.map(n => 
+          n.id === msg.senderId 
+            ? { ...n, battery, signal, active: true } 
+            : n
+        ));
+        return;
       }
+
+      if (msg.type === 'SOS') {
+        setEmergencyAlert({ 
+          sender: msg.senderId.slice(0, 4), 
+          time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) 
+        });
+        addPacket('SOS_ALRT', msg.senderId.slice(0, 4), 'PRIORITY_CRITICAL');
+        return;
+      }
+
+      const payload: VaultMessage = msg.payload;
+      const exists = await vault.messages.get(payload.id);
+      
+      if (!exists) {
+        await vault.messages.add(payload);
+        setMessages(prev => [...prev, payload]);
+        
+        // Show in terminal
+        const isRelayed = msg.hops && msg.hops.length > 2;
+        addPacket(
+          isRelayed ? 'RELAY_IN' : 'RECV', 
+          msg.senderId.slice(0, 4), 
+          isRelayed ? `VIA_${msg.hops[msg.hops.length-2].slice(0,4)}` : 'DIRECT_LINK'
+        );
+      }
+    });
+
+    // 2. Relay Activity (This node is helping the mesh)
+    meshService.on('relay_log', (data: { id: string, source: string, type: string }) => {
+      const id = data.id.slice(0,4);
+      setRelayQueue(prev => [...prev, { id, source: data.source.slice(0,4), type: data.type }].slice(-5));
+      
+      setTimeout(() => {
+        setRelayQueue(prev => prev.filter(p => p.id !== id));
+        addPacket('FORWARD', data.source.slice(0,4), `HOP_DECREMENT`);
+      }, 1500);
     });
 
     meshService.on('peer_connected', (id: string) => {
@@ -84,7 +133,7 @@ export default function App() {
         if (prev.find(n => n.id === id)) return prev;
         return [...prev, {
           id,
-          name: `OPERADOR-${id}`,
+          name: `OPERADOR-${id.slice(0,4)}`,
           distance: 0,
           hops: 1,
           signal: 'Strong',
@@ -113,8 +162,10 @@ export default function App() {
 
     await vault.messages.add(newMessage);
     setMessages(prev => [...prev, newMessage]);
-    meshService.broadcast(newMessage);
-    addPacket('XMIT', 'ME', 'MESH_BROADCAST');
+    
+    // Broadcast via ARP (Now returns a Promise due to encryption)
+    const msgId = await meshService.broadcast(newMessage, 'CHAT');
+    addPacket('XMIT', 'ME', `AES_PKT_${msgId}`);
   };
 
 
@@ -126,7 +177,28 @@ export default function App() {
     <div className={`h-screen flex flex-col bg-obsidian text-gray-300 font-sans select-none overflow-hidden ${isCamoMode ? 'brightness-[0.15] contrast-150' : ''}`}>
       <div className="scanline"></div>
       
-      {/* Header */}
+      {/* Emergency Overlay */}
+      <AnimatePresence>
+        {emergencyAlert && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] pointer-events-none border-[12px] border-red-600 animate-pulse bg-red-900/10 flex items-start justify-center pt-20"
+          >
+            <div className="bg-red-600 text-white px-6 py-3 rounded-full font-black tracking-[0.3em] flex items-center gap-3 shadow-[0_0_50px_rgba(220,38,38,0.5)] pointer-events-auto">
+               <AlertTriangle className="w-6 h-6 animate-bounce" />
+               MAYDAY :: OPERADOR-{emergencyAlert.sender} :: {emergencyAlert.time}
+               <button 
+                 onClick={() => setEmergencyAlert(null)}
+                 className="ml-4 p-1 hover:bg-black/20 rounded-full transition-colors"
+               >
+                 <X className="w-5 h-5" />
+               </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <header className="px-4 py-3 border-b border-tactical-dark flex justify-between items-center bg-obsidian/80 backdrop-blur-md z-10">
         <div className="flex items-center gap-2">
           <Radio className="w-5 h-5 text-tactical-orange" />
@@ -182,8 +254,7 @@ export default function App() {
               packets={packets} 
               relayQueue={relayQueue} 
               onInject={() => {
-                if (Math.random() > 0.5) addPacket('SACK', 'ECHO-9', '64B');
-                injectPacket();
+                addPacket('QUERY', 'MESH', 'NODE_STATUS_REQ');
               }} 
               onClear={async () => {
                 await vault.messages.clear();
@@ -397,11 +468,21 @@ function RadarScreen({ nodes, isTransmitting, resolveName }: { nodes: Node[], is
                    <div style={{ transform: `rotate(-${angle}deg)` }} className="group relative">
                      {/* Tactical Blip (Crosshair dot) */}
                      <div className={`relative flex items-center justify-center`}>
-                        <div className={`w-3 h-3 border border-cyber-cyan rounded-full ${node.distance === 0 ? 'bg-tactical-orange animate-pulse' : 'bg-cyber-dark'}`}></div>
-                        <div className="absolute -top-1 -left-1 w-5 h-5 border border-cyber-cyan/20 rounded-full animate-ping"></div>
+                        <div className={`w-3 h-3 border border-cyber-cyan rounded-full transition-colors duration-500 ${
+                          node.distance === 0 
+                            ? 'bg-tactical-orange animate-pulse' 
+                            : node.battery < 20 
+                              ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)] animate-pulse' 
+                              : node.battery < 50 
+                                ? 'bg-yellow-500' 
+                                : 'bg-cyber-cyan'
+                        }`}></div>
+                        <div className={`absolute -top-1 -left-1 w-5 h-5 border rounded-full animate-ping ${
+                          node.battery < 20 ? 'border-red-500/40' : 'border-cyber-cyan/20'
+                        }`}></div>
                      </div>
-                     <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-cyber-dark/95 border border-cyber-cyan/30 px-2 py-0.5 rounded text-[8px] font-bold text-cyber-cyan whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity uppercase font-mono shadow-[0_0_10px_rgba(0,0,0,0.5)]">
-                        {resolveName(node)}
+                     <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-cyber-dark/95 border border-cyber-cyan/30 px-2 py-0.5 rounded text-[8px] font-bold text-cyber-cyan whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity uppercase font-mono shadow-[0_0_10px_rgba(0,0,0,0.5)] z-30">
+                        {resolveName(node)} • {node.battery}%
                      </div>
                    </div>
                  </motion.div>
@@ -465,7 +546,10 @@ function ChatScreen({ messages, onSendMessage }: { messages: VaultMessage[], onS
                 <span className={`text-[8px] font-black uppercase tracking-widest ${msg.isMe ? 'text-tactical-orange' : 'text-cyber-cyan'}`}>
                   {msg.senderName}
                 </span>
-                <span className="text-[8px] text-gray-500">{msg.time}</span>
+                <span className="text-[8px] text-gray-500 flex items-center gap-1">
+                  {msg.isEncrypted && <ShieldCheck className="w-2.5 h-2.5 text-cyber-cyan" />}
+                  {msg.time}
+                </span>
               </div>
               <p className="text-xs leading-relaxed">{msg.text}</p>
             </div>

@@ -11,6 +11,7 @@ export interface Message {
   type?: 'TEXT' | 'MEDIA';
   progress?: number;
   chunks?: { received: number; total: number };
+  isEncrypted?: boolean;
 }
 
 export interface Operator {
