@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Html5QrcodeScanner } from 'html5-qrcode';
+import { Html5Qrcode } from 'html5-qrcode';
 import { meshService } from '../services/mesh';
 import { motion, AnimatePresence } from 'framer-motion';
-import { QrCode, Camera, Terminal, Key } from 'lucide-react';
+import { QrCode, Camera, Terminal, Key, AlertCircle } from 'lucide-react';
 
 interface HandshakeUIProps {
   onSuccess: () => void;
@@ -14,14 +14,15 @@ const HandshakeUI: React.FC<HandshakeUIProps> = ({ onSuccess, onCancel }) => {
   const [mode, setMode] = useState<'IDLE' | 'GENERATE' | 'SCAN' | 'ANSWERING'>('IDLE');
   const [sdpData, setSdpData] = useState<string>('');
   const [log, setLog] = useState<string[]>(['> INICIANDO MÓDULO DE PAREAMENTO...']);
-  const scannerRef = useRef<Html5QrcodeScanner | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const scannerRef = useRef<Html5Qrcode | null>(null);
 
   const addLog = (msg: string) => setLog(prev => [...prev.slice(-4), `> ${msg}`]);
 
   useEffect(() => {
     return () => {
       if (scannerRef.current) {
-        scannerRef.current.clear();
+        scannerRef.current.stop().catch(() => {});
       }
     };
   }, []);
@@ -34,27 +35,34 @@ const HandshakeUI: React.FC<HandshakeUIProps> = ({ onSuccess, onCancel }) => {
     addLog('AGUARDANDO LEITURA DO OPERADOR REMOTO...');
   };
 
-  const handleStartScan = () => {
+  const handleStartScan = async () => {
     setMode('SCAN');
+    setError(null);
     addLog('INICIALIZANDO SCANNER ÓPTICO...');
     
     // Defer initialization to allow DOM update
-    setTimeout(() => {
-      const scanner = new Html5QrcodeScanner(
-        "reader", 
-        { fps: 10, qrbox: { width: 250, height: 250 } },
-        /* verbose= */ false
-      );
-      
-      scanner.render((decodedText) => {
-        scanner.clear();
-        processScannedData(decodedText);
-      }, () => {
-        // Silent error handling for scanner
-      });
-      
-      scannerRef.current = scanner;
-    }, 100);
+    setTimeout(async () => {
+      try {
+        const scanner = new Html5Qrcode("reader");
+        scannerRef.current = scanner;
+        
+        await scanner.start(
+          { facingMode: "environment" }, 
+          { fps: 10, qrbox: { width: 250, height: 250 } },
+          (decodedText) => {
+            scanner.stop().then(() => {
+              processScannedData(decodedText);
+            });
+          },
+          undefined
+        );
+        addLog('SISTEMA ÓPTICO ONLINE.');
+      } catch (err: any) {
+        console.error(err);
+        setError("FALHA AO ACESSAR CÂMERA. VERIFIQUE AS PERMISSÕES.");
+        addLog('ERRO: SENSOR NÃO DETECTADO.');
+      }
+    }, 300);
   };
 
   const processScannedData = async (data: string) => {
@@ -126,7 +134,7 @@ const HandshakeUI: React.FC<HandshakeUIProps> = ({ onSuccess, onCancel }) => {
             >
               <div className="relative p-4 bg-white rounded-xl shadow-[0_0_50px_rgba(0,240,255,0.2)]">
                 {sdpData ? (
-                  <QRCodeSVG value={sdpData} size={220} level="L" marginSize={2} />
+                  <QRCodeSVG value={sdpData} size={280} level="Q" marginSize={3} />
                 ) : (
                   <div className="w-[220px] h-[220px] flex items-center justify-center">
                     <div className="w-8 h-8 border-2 border-cyber-cyan border-t-transparent rounded-full animate-spin"></div>
@@ -158,8 +166,25 @@ const HandshakeUI: React.FC<HandshakeUIProps> = ({ onSuccess, onCancel }) => {
               animate={{ opacity: 1 }}
               className="w-full max-w-sm aspect-square bg-black border border-cyber-cyan/50 overflow-hidden relative rounded-lg"
             >
-              <div id="reader" className="w-full h-full"></div>
-              <div className="absolute inset-0 pointer-events-none border-2 border-cyber-cyan/30 animate-pulse"></div>
+              {error ? (
+                <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center space-y-4">
+                  <AlertCircle className="w-12 h-12 text-red-500 animate-pulse" />
+                  <p className="text-xs font-bold text-red-500 uppercase tracking-widest leading-relaxed">
+                    {error}
+                  </p>
+                  <button 
+                    onClick={handleStartScan}
+                    className="px-4 py-2 bg-cyber-cyan text-obsidian text-[10px] font-black uppercase tracking-widest"
+                  >
+                    Tentar Novamente
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div id="reader" className="w-full h-full"></div>
+                  <div className="absolute inset-0 pointer-events-none border-2 border-cyber-cyan/30 animate-pulse"></div>
+                </>
+              )}
             </motion.div>
           )}
         </AnimatePresence>

@@ -44,6 +44,10 @@ export class AlphaVault extends Dexie {
       profile: 'id'
     });
   }
+
+  async getProfile(): Promise<UserProfile | undefined> {
+    return await this.profile.toCollection().first();
+  }
 }
 
 export const vault = new AlphaVault();

@@ -69,7 +69,25 @@ export default function App() {
 
   // Load Initial Data from Real Vault
   useEffect(() => {
+    const initializeProfile = async () => {
+      let profile = await vault.getProfile();
+      if (!profile) {
+        const newId = Math.random().toString(36).substr(2, 6).toUpperCase();
+        profile = {
+          id: newId,
+          callsign: `OPERADOR-${newId}`,
+          shortId: newId,
+          publicKey: 'TODO_GENERATE',
+          privateKey: 'TODO_GENERATE',
+          setupComplete: true
+        };
+        await vault.profile.add(profile);
+      }
+      meshService.setIdentity(profile.id, profile.callsign);
+    };
+
     const loadData = async () => {
+      await initializeProfile();
       const history = await vault.messages.orderBy('time').reverse().limit(50).toArray();
       setMessages(history.reverse());
     };
@@ -82,13 +100,27 @@ export default function App() {
     meshService.on('message', async (msg: MeshMessage) => {
       // Handle different message types
       if (msg.type === 'BEACON') {
-        const payload = msg.payload as { battery: number; signal: "Strong" | "Weak" | "Dead" };
-        const { battery, signal } = payload;
-        setNodes(prev => prev.map(n => 
-          n.id === msg.senderId 
-            ? { ...n, battery, signal, active: true } 
-            : n
-        ));
+        const payload = msg.payload as { battery: number; signal: "Strong" | "Weak" | "Dead", callsign: string };
+        const { battery, signal, callsign } = payload;
+        setNodes(prev => {
+          const exists = prev.find(n => n.id === msg.senderId);
+          if (exists) {
+            return prev.map(n => 
+              n.id === msg.senderId 
+                ? { ...n, battery, signal, name: callsign, active: true } 
+                : n
+            );
+          }
+          return [...prev, {
+            id: msg.senderId,
+            name: callsign,
+            distance: 1,
+            hops: 1,
+            signal,
+            battery,
+            active: true
+          }];
+        });
         return;
       }
 
@@ -101,21 +133,34 @@ export default function App() {
         return;
       }
 
-      const payload = msg.payload as VaultMessage;
-      const exists = await vault.messages.get(payload.id);
-      
-      if (!exists) {
-        await vault.messages.add(payload);
-        setMessages(prev => [...prev, payload]);
+      if (msg.type === 'CHAT') {
+        const payload = msg.payload as VaultMessage;
+        const exists = await vault.messages.get(payload.id);
         
-        // Show in terminal
-        const isRelayed = msg.hops && msg.hops.length > 2;
-        addPacket(
-          isRelayed ? 'RELAY_IN' : 'RECV', 
-          msg.senderId.slice(0, 4), 
-          isRelayed ? `VIA_${msg.hops[msg.hops.length-2].slice(0,4)}` : 'DIRECT_LINK'
-        );
+        if (!exists) {
+          const incomingMsg = { ...payload, isMe: false, status: 'DELIVERED' as const };
+          await vault.messages.add(incomingMsg);
+          setMessages(prev => [...prev, incomingMsg]);
+          
+          // Show in terminal
+          const isRelayed = msg.hops && msg.hops.length > 2;
+          addPacket(
+            isRelayed ? 'RELAY_IN' : 'RECV', 
+            msg.senderId.slice(0, 4), 
+            isRelayed ? `VIA_${msg.hops[msg.hops.length-2].slice(0,4)}` : 'DIRECT_LINK'
+          );
+        }
       }
+    });
+
+    // Handle ACKs
+    meshService.on('ack', async (msgId: string) => {
+        const msg = await vault.messages.get(msgId);
+        if (msg && msg.isMe) {
+            await vault.messages.update(msgId, { status: 'DELIVERED' });
+            setMessages(prev => prev.map(m => m.id === msgId ? { ...m, status: 'DELIVERED' } : m));
+            addPacket('ACK', msgId.slice(0,4), 'CONFIRMED');
+        }
     });
 
     // 2. Relay Activity (This node is helping the mesh)
@@ -151,13 +196,14 @@ export default function App() {
   }, []);
 
   const handleSend = async (text: string) => {
+    const msgId = Math.random().toString(36).substr(2, 9);
     const newMessage: VaultMessage = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: msgId,
       senderId: meshService.getMyId(),
       senderName: 'VOCÊ',
       text,
       time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-      status: 'DELIVERED',
+      status: 'SENDING',
       isMe: true
     };
 
@@ -165,8 +211,8 @@ export default function App() {
     setMessages(prev => [...prev, newMessage]);
     
     // Broadcast via ARP (Now returns a Promise due to encryption)
-    const msgId = await meshService.broadcast(newMessage, 'CHAT');
-    addPacket('XMIT', 'ME', `AES_PKT_${msgId}`);
+    await meshService.broadcast(newMessage, 'CHAT');
+    addPacket('XMIT', 'ME', `AES_PKT_${msgId.slice(0,4)}`);
   };
 
 
@@ -185,9 +231,10 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] pointer-events-none border-[12px] border-red-600 animate-pulse bg-red-900/10 flex items-start justify-center pt-20"
+            className="fixed inset-0 z-[100] pointer-events-none border-[12px] border-red-600 animate-pulse bg-red-900/40 flex items-start justify-center pt-20"
           >
-            <div className="bg-red-600 text-white px-6 py-3 rounded-full font-black tracking-[0.3em] flex items-center gap-3 shadow-[0_0_50px_rgba(220,38,38,0.5)] pointer-events-auto">
+            <div className="absolute inset-0 bg-red-600/20 animate-[ping_1.5s_infinite] pointer-events-none"></div>
+            <div className="bg-red-600 text-white px-6 py-3 rounded-full font-black tracking-[0.3em] flex items-center gap-3 shadow-[0_0_50px_rgba(220,38,38,0.8)] pointer-events-auto relative z-10">
                <AlertTriangle className="w-6 h-6 animate-bounce" />
                MAYDAY :: OPERADOR-{emergencyAlert.sender} :: {emergencyAlert.time}
                <button 
@@ -265,6 +312,14 @@ export default function App() {
               key="power"
               onToggleStealth={() => setIsStealthMode(!isStealthMode)}
               onToggleCamo={() => setIsCamoMode(!isCamoMode)}
+              onUpdateCallsign={async (name) => {
+                const profile = await vault.getProfile();
+                if (profile) {
+                  const updated = { ...profile, callsign: name };
+                  await vault.profile.put(updated);
+                  meshService.setIdentity(profile.id, name);
+                }
+              }}
             />
           )}
         </AnimatePresence>
@@ -545,6 +600,9 @@ function ChatScreen({ messages, onSendMessage }: { messages: VaultMessage[], onS
                 </span>
                 <span className="text-[8px] text-gray-500 flex items-center gap-1">
                   {msg.isEncrypted && <ShieldCheck className="w-2.5 h-2.5 text-cyber-cyan" />}
+                  {msg.status === 'SENDING' && !msg.isMe && <span className="text-yellow-500">...</span>}
+                  {msg.status === 'DELIVERED' && msg.isMe && <span className="text-cyber-cyan font-bold">✓✓</span>}
+                  {msg.status === 'SENDING' && msg.isMe && <span className="text-gray-600 animate-pulse">✓</span>}
                   {msg.time}
                 </span>
               </div>
@@ -650,13 +708,19 @@ function TacticalTerminal({ packets, relayQueue, onInject, onClear }: { packets:
   );
 }
 
-function PowerSystem({ onToggleStealth, onToggleCamo }: { onToggleStealth: () => void, onToggleCamo: () => void }) {
+function PowerSystem({ onToggleStealth, onToggleCamo, onUpdateCallsign }: { onToggleStealth: () => void, onToggleCamo: () => void, onUpdateCallsign?: (n: string) => void }) {
+  const [callsign, setCallsign] = useState('');
+  
+  useEffect(() => {
+    vault.getProfile().then(p => p && setCallsign(p.callsign));
+  }, []);
+
   return (
     <motion.div 
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
-      className="flex-1 p-6 space-y-6"
+      className="flex-1 p-6 space-y-6 overflow-y-auto"
     >
       <div className="bg-cyber-dark p-6 border border-cyber-cyan/30 rounded-lg flex flex-col items-center">
          <div className="relative w-32 h-32 flex items-center justify-center">
@@ -671,7 +735,25 @@ function PowerSystem({ onToggleStealth, onToggleCamo }: { onToggleStealth: () =>
          </div>
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-4">
+         <div className="space-y-1">
+            <label className="text-[10px] uppercase font-bold text-gray-500 tracking-widest ml-1">Callsign do Operador</label>
+            <div className="flex gap-2">
+              <input 
+                type="text" 
+                value={callsign}
+                onChange={(e) => setCallsign(e.target.value)}
+                className="flex-1 bg-black border border-gray-800 rounded px-3 py-2 text-xs font-mono text-cyber-cyan focus:border-cyber-cyan outline-none"
+              />
+              <button 
+                onClick={() => onUpdateCallsign?.(callsign)}
+                className="px-3 bg-cyber-cyan/10 border border-cyber-cyan text-cyber-cyan text-[10px] font-bold uppercase transition-colors hover:bg-cyber-cyan hover:text-obsidian"
+              >
+                Salvar
+              </button>
+            </div>
+         </div>
+
          <ToggleButton label="Módulo Furtivo" onClick={onToggleStealth} icon={<Zap className="w-4 h-4" />} />
          <ToggleButton label="Modo Camuflagem" onClick={onToggleCamo} icon={<Activity className="w-4 h-4" />} />
       </div>

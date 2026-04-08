@@ -28,11 +28,26 @@ export default function SOSWidget() {
 
   const triggerSOS = async () => {
     setIsSignaling(true);
+    
+    let coords = 'LINK_SILENT';
+    
+    try {
+      if ("geolocation" in navigator) {
+        const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000 });
+        });
+        coords = `${position.coords.latitude.toFixed(4)}, ${position.coords.longitude.toFixed(4)}`;
+      }
+    } catch (e) {
+      console.warn('[SOS] Geolocation failed', e);
+      coords = 'LOC_UNAVAILABLE';
+    }
+
     // Real tactical SOS broadcast
     await meshService.broadcast({
         alert: 'MAYDAY',
         status: 'CRITICAL',
-        coordinates: 'SIMULATED_GPS_FIX'
+        coordinates: coords
     }, 'SOS');
   };
 

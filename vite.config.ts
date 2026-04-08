@@ -8,7 +8,7 @@ export default defineConfig({
     react(),
     nodePolyfills(),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       injectRegister: 'auto',
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
@@ -17,6 +17,7 @@ export default defineConfig({
         skipWaiting: true,
       },
       manifest: {
+        id: 'alpha-comm-tactical-mesh',
         name: 'Alpha Comm: Tactical Mesh',
         short_name: 'Alpha Comm',
         description: 'Elite resilient offline communication system with Alpha Relay Protocol.',
@@ -24,6 +25,8 @@ export default defineConfig({
         background_color: '#0a0a0a',
         display: 'standalone',
         orientation: 'portrait',
+        start_url: '/',
+        scope: '/',
         icons: [
           {
             src: 'icon-192.png',

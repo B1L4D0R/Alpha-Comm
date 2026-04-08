@@ -15,40 +15,47 @@ export interface MeshMessage {
   ttl: number;
   senderId: string;
   timestamp: number;
-  type: 'CHAT' | 'SOS' | 'BEACON' | 'RELAY';
+  type: 'CHAT' | 'SOS' | 'BEACON' | 'RELAY' | 'ACK' | 'PROFILE';
   payload: unknown;
   hops: string[]; // Track which nodes this message has passed through
   isEncrypted?: boolean;
+  ackId?: string; // For ACK messages, points to original msgId
 }
 
 export class MeshService extends EventEmitter {
   private peers: Map<string, PeerConnection> = new Map();
-  private myId: string = Math.random().toString(36).substr(2, 6).toUpperCase();
+  private myId: string = 'PENDING';
+  private callsign: string = 'OPERADOR';
   private pendingInitiator: Peer.Instance | null = null;
   private seenMessageIds: Set<string> = new Set();
   private beaconInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     super();
-    console.log(`[MESH] Service started as: ${this.myId}`);
     
     // Periodically clean seen messages to free memory
     setInterval(() => {
         if (this.seenMessageIds.size > 1000) this.seenMessageIds.clear();
     }, 10 * 60 * 1000);
 
-    this.startStatusBeacon();
     securityService.initializeKey();
   }
 
+  setIdentity(id: string, callsign: string) {
+    this.myId = id;
+    this.callsign = callsign;
+    console.log(`[MESH] Identity Set: ${this.callsign} [${this.myId}]`);
+    this.startStatusBeacon();
+  }
+
   startStatusBeacon() {
-    if (this.beaconInterval) return;
+    if (this.beaconInterval || this.myId === 'PENDING') return;
     this.beaconInterval = setInterval(async () => {
-      // Simulate battery level (would use navigator.getBattery() in production)
+      // Simulate battery level
       const battery = Math.floor(Math.random() * 100);
       const signal = Math.random() > 0.3 ? 'Strong' : 'Weak';
       
-      this.broadcast({ battery, signal }, 'BEACON');
+      this.broadcast({ battery, signal, callsign: this.callsign }, 'BEACON');
     }, 30000); // Every 30 seconds
   }
 
@@ -57,6 +64,50 @@ export class MeshService extends EventEmitter {
       clearInterval(this.beaconInterval);
       this.beaconInterval = null;
     }
+  }
+
+  // Ultra-shrink SDP by removing protocol headers and keeping only 1 candidate
+  private simplifySDP(sdp: string): string {
+    let candidateFound = false;
+    return sdp
+      .split('\r\n')
+      .filter(line => {
+        // Headers to remove (fixed or generated)
+        if (line.startsWith('v=')) return false;
+        if (line.startsWith('o=')) return false;
+        if (line.startsWith('s=')) return false;
+        if (line.startsWith('t=')) return false;
+        if (line.startsWith('a=group:BUNDLE')) return false;
+        if (line.startsWith('a=msid-semantic:')) return false;
+        
+        // Redundant technical metadata
+        if (line.startsWith('a=extmap:')) return false;
+        if (line.startsWith('a=rtcp-fb:')) return false;
+        if (line.startsWith('a=fmtp:')) return false;
+        if (line.startsWith('a=msid:')) return false;
+        if (line.startsWith('a=ssrc:')) return false;
+        
+        // Keep only THE FIRST ice candidate (usually the local host IP)
+        if (line.startsWith('a=candidate:')) {
+          if (candidateFound) return false;
+          candidateFound = true;
+          return true;
+        }
+        
+        return true;
+      })
+      .join('\n'); 
+  }
+
+  private expandSDP(mini: string): string {
+    const headers = [
+      'v=0',
+      'o=- 551522079085 2 IN IP4 127.0.0.1',
+      's=-',
+      't=0 0',
+      'a=group:BUNDLE 0'
+    ].join('\r\n');
+    return headers + '\r\n' + mini.replace(/\n/g, '\r\n');
   }
 
   // Create an initiator peer and generate an offer (for Peer B to scan)
@@ -70,10 +121,21 @@ export class MeshService extends EventEmitter {
       this.pendingInitiator = p;
       
       p.on('signal', data => {
-        // Encode and compress the SDP Offer
-        const payload = JSON.stringify({ ...data, senderId: this.myId });
-        const compressed = LZString.compressToEncodedURIComponent(payload);
-        resolve(compressed);
+        if (data.type === 'offer' || data.type === 'answer') {
+          // 1. Minify SDP aggressively
+          const miniSdp = this.simplifySDP(data.sdp || '');
+          
+          // 2. Compact JSON structure: t=type, s=sdp, i=senderId
+          const compactData = {
+              t: data.type === 'offer' ? 1 : 2, // Even smaller keys
+              s: miniSdp,
+              i: this.myId
+          };
+          
+          const payload = JSON.stringify(compactData);
+          const compressed = LZString.compressToEncodedURIComponent(payload);
+          resolve(compressed);
+        }
       });
 
       this.setupHandlers(p, 'OPERATOR_PENDING');
@@ -86,17 +148,32 @@ export class MeshService extends EventEmitter {
       try {
         const decompressed = LZString.decompressFromEncodedURIComponent(compressedOffer);
         if (!decompressed) throw new Error('Failed to decompress offer');
-        const offerData = JSON.parse(decompressed);
+        
+        const compactOffer = JSON.parse(decompressed);
+        // Expand back for simple-peer
+        const offerData = {
+            type: (compactOffer.t === 1 ? 'offer' : 'answer') as 'offer' | 'answer',
+            sdp: this.expandSDP(compactOffer.s || '')
+        };
+
         const p = new Peer({ initiator: false, trickle: false });
 
         p.on('signal', data => {
-          const payload = JSON.stringify({ ...data, senderId: this.myId });
-          const compressedAnswer = LZString.compressToEncodedURIComponent(payload);
-          resolve(compressedAnswer);
+          if (data.type === 'offer' || data.type === 'answer') {
+            const miniSdp = this.simplifySDP(data.sdp || '');
+            const compactAnswer = {
+                t: data.type === 'offer' ? 1 : 2,
+                s: miniSdp,
+                i: this.myId
+            };
+            const payload = JSON.stringify(compactAnswer);
+            const compressed = LZString.compressToEncodedURIComponent(payload);
+            resolve(compressed);
+          }
         });
 
         p.signal(offerData);
-        this.setupHandlers(p, offerData.senderId);
+        this.setupHandlers(p, compactOffer.i);
       } catch (e) {
         console.error('[MESH] Offer processing error', e);
       }
@@ -156,6 +233,16 @@ export class MeshService extends EventEmitter {
         processedMsg.payload = { text: decryptedPayload };
         processedMsg.isEncrypted = false;
       }
+
+      // Send ACK back if it's a CHAT and we are the direct recipient (conceptually)
+      // In a mesh, we ACK if the message is new to us.
+      if (msg.type === 'CHAT' && msg.senderId !== this.myId) {
+          this.sendAck(msg.msgId, msg.senderId);
+      }
+    }
+
+    if (msg.type === 'ACK') {
+        this.emit('ack', msg.ackId);
     }
 
     // 5. Emit locally
@@ -183,7 +270,13 @@ export class MeshService extends EventEmitter {
     try {
       const decompressed = LZString.decompressFromEncodedURIComponent(compressedAnswer);
       if (!decompressed) throw new Error('Failed to decompress answer');
-      const answerData = JSON.parse(decompressed);
+      
+      const compactAnswer = JSON.parse(decompressed);
+      const answerData = {
+          type: (compactAnswer.t === 1 ? 'offer' : 'answer') as 'offer' | 'answer',
+          sdp: this.expandSDP(compactAnswer.s || '')
+      };
+
       if (this.pendingInitiator) {
         this.pendingInitiator.signal(answerData);
       }
@@ -219,6 +312,20 @@ export class MeshService extends EventEmitter {
     this.seenMessageIds.add(msgId);
     this.relay(message);
     return msgId;
+  }
+
+  async sendAck(originalMsgId: string, _recipientId: string) {
+    const ackMessage: MeshMessage = {
+      msgId: Math.random().toString(36).substr(2, 6).toUpperCase(),
+      ttl: 3,
+      senderId: this.myId,
+      timestamp: Date.now(),
+      type: 'ACK',
+      payload: {},
+      hops: [this.myId],
+      ackId: originalMsgId
+    };
+    this.relay(ackMessage);
   }
 
   private relay(message: MeshMessage, excludeId?: string) {
